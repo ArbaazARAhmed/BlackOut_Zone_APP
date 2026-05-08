@@ -3,9 +3,7 @@ package com.blackoutzone.triage.LLM
 import android.content.Context
 import android.util.Log
 import com.blackoutzone.triage.db.BlackoutZoneDatabase
-import com.blackoutzone.triage.db.TriageProtocol
 import org.json.JSONObject
-import org.json.JSONArray
 
 class TriageFunctionBridge(private val context: Context) {
 
@@ -23,6 +21,10 @@ Always use tools when you need specific protocol information. Be concise but tho
     }
 
     private val database = BlackoutZoneDatabase(context)
+    private val stopWords = setOf(
+        "the", "and", "with", "from", "that", "this", "have", "has", "for", "his", "her",
+        "age", "old", "male", "female", "patient", "person", "pain", "very", "after"
+    )
 
     fun dispatch(jsonInput: String): String {
         return try {
@@ -47,7 +49,22 @@ Always use tools when you need specific protocol information. Be concise but tho
         }
     }
 
+    fun lookupRelevantProtocols(symptoms: String): String {
+        val keywords = symptoms
+            .lowercase()
+            .split(Regex("[^a-z0-9]+"))
+            .filter { it.length >= 3 && it !in stopWords }
+            .distinct()
+            .take(12)
+
+        return lookupProtocols(keywords)
+    }
+
     private fun lookupProtocols(keywords: List<String>): String {
+        if (keywords.isEmpty()) {
+            return "No local protocol keywords were detected in the symptom text."
+        }
+
         val protocols = database.getProtocolsByKeywords(keywords)
         return if (protocols.isEmpty()) {
             "No matching protocols found for keywords: ${keywords.joinToString(", ")}"

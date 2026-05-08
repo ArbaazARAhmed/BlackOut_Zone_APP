@@ -200,7 +200,7 @@ class _TriageScreenState extends State<TriageScreen> {
                 decoration: BoxDecoration(
                   color: _getPriorityColor(_result!),
                   borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: _getPriorityTextColor(_result!).withOpacity(0.3)),
+                  border: Border.all(color: _getPriorityTextColor(_result!).withValues(alpha: 0.3)),
                 ),
                 child: SelectableText(
                   _result!,

@@ -79,6 +79,8 @@ class BlackoutZoneDatabase(context: Context) : SQLiteOpenHelper(context, DATABAS
     }
 
     fun getProtocolsByKeywords(keywords: List<String>): List<TriageProtocol> {
+        if (keywords.isEmpty()) return emptyList()
+
         val results = mutableListOf<TriageProtocol>()
         val db = this.readableDatabase
         
@@ -107,6 +109,6 @@ class BlackoutZoneDatabase(context: Context) : SQLiteOpenHelper(context, DATABAS
             } while (cursor.moveToNext())
         }
         cursor.close()
-        return results
+        return results.distinctBy { it.id }
     }
 }

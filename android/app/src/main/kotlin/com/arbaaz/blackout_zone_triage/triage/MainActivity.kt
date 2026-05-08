@@ -109,25 +109,26 @@ class MainActivity : FlutterActivity() {
      */
     private suspend fun prepareModel(modelName: String): String = withContext(Dispatchers.IO) {
         val destinationFile = File(context.filesDir, modelName)
+        val tempFile = File(context.filesDir, "$modelName.tmp")
+        val assetPath = "flutter_assets/assets/$modelName"
+        val assetManager = context.assets
+        val expectedBytes = assetManager.openFd(assetPath).use { it.length }
         
-        // CORRUPTION CHECK: If file exists but is < 1GB, it's a failed copy.
         if (destinationFile.exists()) {
-            if (destinationFile.length() > 1000000000) { 
+            if (destinationFile.length() == expectedBytes) {
                 Log.d("MainActivity", "Verified existing model: ${destinationFile.length()} bytes")
                 return@withContext destinationFile.absolutePath
             } else {
-                Log.w("MainActivity", "Partial model detected (${destinationFile.length()}). Re-extracting...")
+                Log.w("MainActivity", "Model size mismatch (${destinationFile.length()} != $expectedBytes). Re-extracting...")
                 destinationFile.delete()
             }
         }
 
-        val assetManager = context.assets
-        // Path matches Flutter's default asset bundling
-        val assetPath = "flutter_assets/assets/$modelName"
-
         try {
+            if (tempFile.exists()) tempFile.delete()
+
             assetManager.open(assetPath).use { inputStream ->
-                FileOutputStream(destinationFile).use { outputStream ->
+                FileOutputStream(tempFile).use { outputStream ->
                     inputStream.copyTo(outputStream)
                     
                     // ATOMIC SYNC: Force the OS to finish writing before we return
@@ -135,6 +136,17 @@ class MainActivity : FlutterActivity() {
                     outputStream.getFD().sync() 
                 }
             }
+
+            if (tempFile.length() != expectedBytes) {
+                tempFile.delete()
+                throw Exception("Asset copy incomplete: ${tempFile.length()} of $expectedBytes bytes")
+            }
+
+            if (!tempFile.renameTo(destinationFile)) {
+                tempFile.delete()
+                throw Exception("Atomic model install failed")
+            }
+
             Log.d("MainActivity", "Model extraction complete. Sync successful.")
         } catch (e: Exception) {
             Log.e("MainActivity", "Fatal extraction error", e)
