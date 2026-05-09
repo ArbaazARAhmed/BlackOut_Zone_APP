@@ -39,8 +39,8 @@ class MainActivity : FlutterActivity() {
                                         append("TRIAGE: ${redFlag.priority}\n")
                                         append("Reason: ${redFlag.reason}\n\n")
                                         append("Immediate Life-Saving Steps:\n")
-                                        redFlag.immediateSteps.forEachIndexed { idx, step ->
-                                            append("${idx + 1}) $step\n")
+                                        redFlag.immediateSteps.forEachIndexed { idx: Int, step: String ->
+                                        append("${idx + 1}) $step\n")
                                         }
                                         append("\nNote: AI analysis bypassed for critical emergency.")
                                     }
