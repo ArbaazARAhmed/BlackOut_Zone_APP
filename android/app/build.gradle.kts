@@ -63,12 +63,9 @@ android {
     buildTypes {
         getByName("release") {
             signingConfig = signingConfigs.getByName("debug")
-            isMinifyEnabled = true
-            isShrinkResources = true
-            proguardFiles(
-                getDefaultProguardFile("proguard-android-optimize.txt"),
-                "proguard-rules.pro"
-            )
+            // R8 was stripping MediaPipe JNI bindings in release APKs on physical devices.
+            isMinifyEnabled = false
+            isShrinkResources = false
         }
     }
 }

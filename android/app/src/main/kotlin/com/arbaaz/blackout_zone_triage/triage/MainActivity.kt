@@ -54,16 +54,26 @@ class MainActivity : FlutterActivity() {
                                 return@launch
                             }
 
-                            val activeEngine = getOrCreateEngine()
-                            val response = withContext(Dispatchers.Default) {
-                                activeEngine.generateTriageResponse(symptoms)
+                            val bridge = TriageFunctionBridge(applicationContext)
+                            val response = try {
+                                val activeEngine = getOrCreateEngine()
+                                withContext(Dispatchers.Default) {
+                                    activeEngine.generateTriageResponse(symptoms)
+                                }
+                            } catch (aiError: Exception) {
+                                Log.e(TAG, "AI unavailable, using protocol fallback", aiError)
+                                ProtocolFallbackTriage.build(
+                                    symptoms,
+                                    bridge,
+                                    aiError.message
+                                )
                             }
                             result.success(response)
                         } catch (e: Exception) {
                             Log.e(TAG, "Triage failed", e)
                             result.error(
                                 "TRIAGE_ERROR",
-                                "Offline AI failed: ${e.message}",
+                                e.message ?: "Offline triage failed.",
                                 null
                             )
                         }
@@ -100,12 +110,14 @@ class MainActivity : FlutterActivity() {
             Log.d(TAG, "Preparing model...")
             val modelPath = prepareModel(MODEL_FILE_NAME)
 
-            Log.d(TAG, "Creating engine...")
-            val newEngine = GemmaInferenceEngine(
-                applicationContext,
-                modelPath,
-                TriageFunctionBridge(applicationContext)
-            )
+            Log.d(TAG, "Creating engine on background thread...")
+            val newEngine = withContext(Dispatchers.IO) {
+                GemmaInferenceEngine(
+                    applicationContext,
+                    modelPath,
+                    TriageFunctionBridge(applicationContext)
+                )
+            }
 
             if (!newEngine.isReady()) {
                 throw IllegalStateException("Gemma readiness failed after initialization.")

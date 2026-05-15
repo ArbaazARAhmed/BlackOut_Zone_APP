@@ -2,12 +2,13 @@ package com.blackoutzone.triage.LLM
 
 import android.content.Context
 import android.util.Log
+import com.blackoutzone.triage.ModelBundleResolver
 import com.google.mediapipe.tasks.genai.llminference.LlmInference
+import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import java.io.File
 
 class GemmaInferenceEngine(
     private val context: Context,
@@ -16,9 +17,7 @@ class GemmaInferenceEngine(
 ) {
 
     private var llm: LlmInference? = null
-
     private val inferenceMutex = Mutex()
-
     private val TAG = "GemmaEngine"
 
     init {
@@ -26,81 +25,50 @@ class GemmaInferenceEngine(
     }
 
     private fun initializeEngine() {
-
+        val modelFile = File(absoluteModelPath)
         try {
-
-            val modelFile = File(absoluteModelPath)
-
             if (!modelFile.exists()) {
-                throw Exception(
-                    "Model file missing at: $absoluteModelPath"
+                throw IllegalStateException("Model file missing at: $absoluteModelPath")
+            }
+
+            Log.d(TAG, "Loading model: ${modelFile.absolutePath} (${modelFile.length()} bytes)")
+
+            if (!ModelBundleResolver.isValidInferenceModel(modelFile)) {
+                throw IllegalStateException(
+                    "Invalid LiteRT model at ${modelFile.name} (${modelFile.length()} bytes). " +
+                        "Clear app storage and retry."
                 )
             }
 
-            Log.d(
-                TAG,
-                "Model found: ${modelFile.absolutePath}"
-            )
+            val options = LlmInference.LlmInferenceOptions.builder()
+                .setModelPath(modelFile.absolutePath)
+                .setMaxTokens(256)
+                .setTopK(40)
+                .setTemperature(0.4f)
+                .setRandomSeed(42)
+                .build()
 
-            Log.d(
-                TAG,
-                "Model size: ${modelFile.length()}"
-            )
-
-            val options =
-                LlmInference.LlmInferenceOptions
-                    .builder()
-                    .setModelPath(modelFile.absolutePath)
-                    .setMaxTokens(256)
-                    .setTopK(40)
-                    .setTemperature(0.4f)
-                    .setRandomSeed(42)
-                    .build()
-
-            llm =
-                LlmInference.createFromOptions(
-                    context,
-                    options
-                )
-
-            Log.d(
-                TAG,
-                "Gemma initialized successfully"
-            )
-
+            llm = LlmInference.createFromOptions(context, options)
+            Log.d(TAG, "Gemma initialized successfully")
         } catch (e: Exception) {
-
             llm = null
-
-            Log.e(
-                TAG,
-                "Gemma init failed",
-                e
-            )
-
-            throw RuntimeException(
-                "Gemma initialization failed",
-                e
-            )
+            Log.e(TAG, "Gemma init failed for ${modelFile.absolutePath}", e)
+            val detail = e.message ?: e.javaClass.simpleName
+            val cause = e.cause?.message
+            val message = if (cause != null && cause != detail) {
+                "Gemma initialization failed: $detail ($cause)"
+            } else {
+                "Gemma initialization failed: $detail"
+            }
+            throw IllegalStateException(message, e)
         }
     }
 
-    fun isReady(): Boolean {
-        return llm != null
-    }
+    fun isReady(): Boolean = llm != null
 
-    suspend fun generateTriageResponse(
-        userPrompt: String
-    ): String = withContext(Dispatchers.Default) {
-
+    suspend fun generateTriageResponse(userPrompt: String): String = withContext(Dispatchers.Default) {
         inferenceMutex.withLock {
-
-            val model = llm
-
-            if (model == null) {
-                return@withLock "Offline AI engine unavailable."
-            }
-
+            val model = llm ?: return@withLock "Offline AI engine unavailable."
             try {
                 model.generateResponse(buildPrompt(userPrompt))
             } catch (e: Exception) {
@@ -125,15 +93,8 @@ class GemmaInferenceEngine(
         }
     }
 
-    private fun buildPrompt(
-        userPrompt: String
-    ): String {
-
-        val protocols =
-            bridge.lookupRelevantProtocols(
-                userPrompt
-            )
-
+    private fun buildPrompt(userPrompt: String): String {
+        val protocols = bridge.lookupRelevantProtocols(userPrompt)
         return """
 You are an offline emergency medical triage assistant.
 

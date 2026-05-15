@@ -14,6 +14,8 @@ object ModelBundleResolver {
 
     private const val TAG = "ModelBundleResolver"
     private const val MIN_MODEL_BYTES = 10L * 1024 * 1024
+    // Size of gemma-1.1-2b-it-cpu-int4.bin inside the shipped gemma4.task tar bundle.
+    private const val EXPECTED_BIN_BYTES = 1_346_427_328L
 
     fun resolveInferenceModelPath(bundleFile: File, outputDir: File): String {
         if (!bundleFile.exists()) {
@@ -35,22 +37,55 @@ object ModelBundleResolver {
     private fun extractTarBundle(tarFile: File, outputDir: File): String {
         val existingBin = outputDir.listFiles()
             ?.filter { it.isFile && it.name.endsWith(".bin", ignoreCase = true) }
-            ?.firstOrNull { it.length() >= MIN_MODEL_BYTES }
+            ?.firstOrNull { isValidInferenceModel(it) }
 
         if (existingBin != null) {
             Log.d(TAG, "Using cached extracted model: ${existingBin.absolutePath}")
             return existingBin.absolutePath
         }
 
+        outputDir.listFiles()
+            ?.filter { it.isFile && it.name.endsWith(".bin", ignoreCase = true) }
+            ?.forEach { stale ->
+                Log.w(TAG, "Removing stale extracted model: ${stale.name} (${stale.length()} bytes)")
+                stale.delete()
+            }
+
         Log.d(TAG, "Extracting tar model bundle: ${tarFile.absolutePath}")
         val extracted = extractFirstRegularFile(tarFile, outputDir)
-        if (!extracted.exists() || extracted.length() < MIN_MODEL_BYTES) {
+        if (!isValidInferenceModel(extracted)) {
+            extracted.delete()
             throw IllegalStateException(
-                "Extracted model is missing or too small at ${extracted.absolutePath}"
+                "Extracted model is invalid at ${extracted.absolutePath} (${extracted.length()} bytes)"
             )
         }
         Log.d(TAG, "Extracted inference model: ${extracted.absolutePath} (${extracted.length()} bytes)")
         return extracted.absolutePath
+    }
+
+    fun isValidInferenceModel(file: File): Boolean {
+        if (!file.exists() || file.length() < MIN_MODEL_BYTES) {
+            return false
+        }
+        if (file.length() != EXPECTED_BIN_BYTES) {
+            return false
+        }
+        return hasTfliteMagic(file)
+    }
+
+    private fun hasTfliteMagic(file: File): Boolean {
+        return try {
+            FileInputStream(file).use { input ->
+                val header = ByteArray(8)
+                if (input.read(header) != 8) {
+                    return false
+                }
+                String(header, 4, 4, StandardCharsets.US_ASCII) == "TFL3"
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Could not read model header for ${file.name}", e)
+            false
+        }
     }
 
     private fun isTarArchive(file: File): Boolean {

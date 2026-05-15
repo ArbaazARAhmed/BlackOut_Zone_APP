@@ -1,3 +1,8 @@
+# Keep all MediaPipe / GenAI classes and JNI entry points (required for release builds).
+-keep class com.google.mediapipe.** { *; }
+-keep class org.tensorflow.lite.** { *; }
+-dontwarn com.google.mediapipe.**
+
 # 1. Keep the MediaPipe GenAI tasks
 -keep class com.google.mediapipe.tasks.genai.llminference.** { *; }
 
