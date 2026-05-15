@@ -38,6 +38,29 @@ class _TriageScreenState extends State<TriageScreen> {
   String? _error;
   String? _modelSchema;
   bool _showModelSchema = false;
+  String? _offlineModeNote;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadOfflineMode();
+  }
+
+  Future<void> _loadOfflineMode() async {
+    try {
+      final mode = await _channel.invokeMethod<Map<Object?, Object?>>('getOfflineMode');
+      final enabled = mode?['gemmaEnabled'] == true;
+      final message = mode?['message']?.toString();
+      if (!mounted) return;
+      setState(() {
+        _offlineModeNote = enabled
+            ? 'On-device Gemma is available on this phone.'
+            : (message ?? 'Using local medical protocols only on this device.');
+      });
+    } catch (_) {
+      // Non-fatal; triage still works via native fallback.
+    }
+  }
 
   @override
   void dispose() {
@@ -124,6 +147,21 @@ class _TriageScreenState extends State<TriageScreen> {
               'Describe symptoms and context. Keep it factual: age, major conditions, what happened, bleeding, breathing, etc.',
               style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: Colors.grey.shade700),
             ),
+            if (_offlineModeNote != null) ...[
+              const SizedBox(height: 12),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.blue.shade50,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.blue.shade200),
+                ),
+                child: Text(
+                  _offlineModeNote!,
+                  style: TextStyle(fontSize: 13, color: Colors.blue.shade900),
+                ),
+              ),
+            ],
             const SizedBox(height: 16),
             TextField(
               controller: _symptomsController,

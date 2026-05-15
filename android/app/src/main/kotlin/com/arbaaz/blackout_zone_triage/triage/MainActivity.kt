@@ -22,10 +22,16 @@ class MainActivity : FlutterActivity() {
     @Volatile
     private var engine: GemmaInferenceEngine? = null
 
+    @Volatile
+    private var deviceAssessment: OfflineAiCapability.Assessment? = null
+
     private val engineInitMutex = Mutex()
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+
+        deviceAssessment = OfflineAiCapability.assess(applicationContext)
+        Log.i(TAG, "Offline AI assessment: ${deviceAssessment?.reason}")
 
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
@@ -55,18 +61,41 @@ class MainActivity : FlutterActivity() {
                             }
 
                             val bridge = TriageFunctionBridge(applicationContext)
-                            val response = try {
-                                val activeEngine = getOrCreateEngine()
-                                withContext(Dispatchers.Default) {
-                                    activeEngine.generateTriageResponse(symptoms)
+                            val assessment = deviceAssessment
+                                ?: OfflineAiCapability.assess(applicationContext).also {
+                                    deviceAssessment = it
                                 }
-                            } catch (aiError: Exception) {
-                                Log.e(TAG, "AI unavailable, using protocol fallback", aiError)
+
+                            val response = if (!assessment.canUseGemma) {
+                                Log.i(TAG, "Protocol-only triage: ${assessment.reason}")
                                 ProtocolFallbackTriage.build(
                                     symptoms,
                                     bridge,
-                                    aiError.message
+                                    assessment.reason
                                 )
+                            } else {
+                                try {
+                                    OfflineAiCapability.clearStaleMediapipeCache(applicationContext)
+                                    if (!OfflineAiCapability.cacheHasRoomForMediapipe(applicationContext)) {
+                                        ProtocolFallbackTriage.build(
+                                            symptoms,
+                                            bridge,
+                                            "Not enough cache space to compile Gemma weights."
+                                        )
+                                    } else {
+                                        val activeEngine = getOrCreateEngine()
+                                        withContext(Dispatchers.Default) {
+                                            activeEngine.generateTriageResponse(symptoms)
+                                        }
+                                    }
+                                } catch (aiError: Exception) {
+                                    Log.e(TAG, "AI unavailable, using protocol fallback", aiError)
+                                    ProtocolFallbackTriage.build(
+                                        symptoms,
+                                        bridge,
+                                        aiError.message
+                                    )
+                                }
                             }
                             result.success(response)
                         } catch (e: Exception) {
@@ -81,19 +110,46 @@ class MainActivity : FlutterActivity() {
                 }
 
                 "getModelSchema" -> {
+                    val assessment = deviceAssessment
+                        ?: OfflineAiCapability.assess(applicationContext).also {
+                            deviceAssessment = it
+                        }
+                    if (!assessment.canUseGemma) {
+                        result.success(
+                            buildString {
+                                appendLine("Status: Protocol-only mode (Gemma disabled)")
+                                appendLine("Reason: ${assessment.reason}")
+                                appendLine("Red-flag rules: enabled")
+                                appendLine("SQLite protocols: enabled")
+                            }.trimEnd()
+                        )
+                        return@setMethodCallHandler
+                    }
+
                     CoroutineScope(Dispatchers.Main).launch {
                         try {
                             val activeEngine = getOrCreateEngine()
                             result.success(activeEngine.getModelSchema())
                         } catch (e: Exception) {
                             Log.e(TAG, "Model schema failed", e)
-                            result.error(
-                                "SCHEMA_ERROR",
-                                e.message ?: "Could not load offline AI engine.",
-                                null
+                            result.success(
+                                "Status: Gemma unavailable\nDetail: ${e.message}\nFallback: SQLite protocols"
                             )
                         }
                     }
+                }
+
+                "getOfflineMode" -> {
+                    val assessment = deviceAssessment
+                        ?: OfflineAiCapability.assess(applicationContext).also {
+                            deviceAssessment = it
+                        }
+                    result.success(
+                        mapOf(
+                            "gemmaEnabled" to assessment.canUseGemma,
+                            "message" to assessment.reason
+                        )
+                    )
                 }
 
                 else -> result.notImplemented()
@@ -102,10 +158,22 @@ class MainActivity : FlutterActivity() {
     }
 
     private suspend fun getOrCreateEngine(): GemmaInferenceEngine {
+        val assessment = deviceAssessment
+            ?: OfflineAiCapability.assess(applicationContext).also { deviceAssessment = it }
+        if (!assessment.canUseGemma) {
+            throw IllegalStateException(assessment.reason)
+        }
+
         engine?.let { return it }
 
         return engineInitMutex.withLock {
             engine?.let { return@withLock it }
+
+            if (!OfflineAiCapability.cacheHasRoomForMediapipe(applicationContext)) {
+                throw IllegalStateException(
+                    "Need at least 700 MB free app cache before loading Gemma."
+                )
+            }
 
             Log.d(TAG, "Preparing model...")
             val modelPath = prepareModel(MODEL_FILE_NAME)
