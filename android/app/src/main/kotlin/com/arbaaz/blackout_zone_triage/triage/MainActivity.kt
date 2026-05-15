@@ -1,158 +1,212 @@
 package com.blackoutzone.triage
 
+import android.util.Log
+import com.blackoutzone.triage.LLM.GemmaInferenceEngine
+import com.blackoutzone.triage.LLM.TriageFunctionBridge
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
-import com.blackoutzone.triage.LLM.GemmaInferenceEngine
-import com.blackoutzone.triage.LLM.TriageFunctionBridge
-import com.blackoutzone.triage.RedFlagDetector
+import java.io.File
+import java.io.FileOutputStream
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import java.io.File
-import java.io.FileOutputStream
-import android.util.Log
 
 class MainActivity : FlutterActivity() {
-    private val CHANNEL = "com.blackoutzone/triage"
 
-    // @Volatile ensures the engine instance is visible across threads immediately
-    @Volatile private var engine: GemmaInferenceEngine? = null
+    private val channelName = "com.blackoutzone/triage"
+
+    @Volatile
+    private var engine: GemmaInferenceEngine? = null
+
+    private val engineInitMutex = Mutex()
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
-            .setMethodCallHandler { call, result ->
-                when (call.method) {
-                    "analyzeSymptoms" -> {
-                        val symptoms = call.argument<String>("symptoms") ?: ""
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            channelName
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "analyzeSymptoms" -> {
+                    val symptoms = call.argument<String>("symptoms") ?: ""
+                    CoroutineScope(Dispatchers.Main).launch {
+                        try {
+                            val redFlag = withContext(Dispatchers.Default) {
+                                RedFlagDetector.evaluate(symptoms)
+                            }
 
-                        // We use Main scope for UI interaction, but offload heavy tasks
-                        CoroutineScope(Dispatchers.Main).launch {
-                            try {
-                                // 1. FAST PATH: Check Hard-coded Red Flags (Medical Safety)
-                                val redFlag = RedFlagDetector.evaluate(symptoms)
-                                if (redFlag.triggered) {
-                                    val fastResponse = buildString {
+                            if (redFlag.triggered) {
+                                result.success(
+                                    buildString {
                                         append("TRIAGE: ${redFlag.priority}\n")
                                         append("Reason: ${redFlag.reason}\n\n")
-                                        append("Immediate Life-Saving Steps:\n")
-                                        redFlag.immediateSteps.forEachIndexed { idx: Int, step: String ->
-                                        append("${idx + 1}) $step\n")
+                                        append("Immediate Steps:\n")
+                                        redFlag.immediateSteps.forEachIndexed { idx, step ->
+                                            append("${idx + 1}) $step\n")
                                         }
-                                        append("\nNote: AI analysis bypassed for critical emergency.")
                                     }
-                                    result.success(fastResponse)
-                                    return@launch // Stop here for emergencies
-                                }
-
-                                // 2. AI PATH: Prepare/Retrieve the Engine
-                                val appContext = applicationContext
-                                val activeEngine = engine ?: withContext(Dispatchers.IO) {
-                                    val modelName = "gemma4.task"
-                                    val modelPath = prepareModel(modelName)
-                                    val bridge = TriageFunctionBridge(appContext)
-                                    
-                                    Log.d("MainActivity", "Initializing new Gemma Engine session...")
-                                    val newEngine = GemmaInferenceEngine(appContext, modelPath, bridge)
-                                    
-                                    // Save for next call
-                                    engine = newEngine
-                                    newEngine 
-                                }
-
-                                // 3. GENERATE: Get nuanced AI triage
-                                val response = activeEngine.generateTriageResponse(symptoms)
-                                result.success(response)
-
-                            } catch (e: Exception) {
-                                Log.e("MainActivity", "Triage Process Failed", e)
-                                result.error("TRIAGE_ERROR", "Engine failed: ${e.message}", null)
+                                )
+                                return@launch
                             }
+
+                            val activeEngine = getOrCreateEngine()
+                            val response = withContext(Dispatchers.Default) {
+                                activeEngine.generateTriageResponse(symptoms)
+                            }
+                            result.success(response)
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Triage failed", e)
+                            result.error(
+                                "TRIAGE_ERROR",
+                                "Offline AI failed: ${e.message}",
+                                null
+                            )
                         }
                     }
-                    "getModelSchema" -> {
-                        CoroutineScope(Dispatchers.Main).launch {
-                            try {
-                                val appContext = applicationContext
-                                val activeEngine = engine ?: withContext(Dispatchers.IO) {
-                                    val modelName = "gemma4.task"
-                                    val modelPath = prepareModel(modelName)
-                                    val bridge = TriageFunctionBridge(appContext)
-                                    
-                                    Log.d("MainActivity", "Initializing new Gemma Engine session...")
-                                    val newEngine = GemmaInferenceEngine(appContext, modelPath, bridge)
-                                    
-                                    // Save for next call
-                                    engine = newEngine
-                                    newEngine 
-                                }
-
-                                val schema = activeEngine.getModelSchema()
-                                result.success(schema)
-                            } catch (e: Exception) {
-                                Log.e("MainActivity", "Failed to get model schema", e)
-                                result.error("SCHEMA_ERROR", "Failed: ${e.message}", null)
-                            }
-                        }
-                    }
-                    else -> result.notImplemented()
                 }
+
+                "getModelSchema" -> {
+                    CoroutineScope(Dispatchers.Main).launch {
+                        try {
+                            val activeEngine = getOrCreateEngine()
+                            result.success(activeEngine.getModelSchema())
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Model schema failed", e)
+                            result.error(
+                                "SCHEMA_ERROR",
+                                e.message ?: "Could not load offline AI engine.",
+                                null
+                            )
+                        }
+                    }
+                }
+
+                else -> result.notImplemented()
             }
+        }
     }
 
-    /**
-     * Ensures the 1.3GB model is extracted safely to internal storage.
-     * Includes length checks and physical disk sync to prevent corruption.
-     */
+    private suspend fun getOrCreateEngine(): GemmaInferenceEngine {
+        engine?.let { return it }
+
+        return engineInitMutex.withLock {
+            engine?.let { return@withLock it }
+
+            Log.d(TAG, "Preparing model...")
+            val modelPath = prepareModel(MODEL_FILE_NAME)
+
+            Log.d(TAG, "Creating engine...")
+            val newEngine = GemmaInferenceEngine(
+                applicationContext,
+                modelPath,
+                TriageFunctionBridge(applicationContext)
+            )
+
+            if (!newEngine.isReady()) {
+                throw IllegalStateException("Gemma readiness failed after initialization.")
+            }
+
+            engine = newEngine
+            Log.d(TAG, "Gemma ready")
+            newEngine
+        }
+    }
+
     private suspend fun prepareModel(modelName: String): String = withContext(Dispatchers.IO) {
-        val destinationFile = File(context.filesDir, modelName)
-        val tempFile = File(context.filesDir, "$modelName.tmp")
-        val assetPath = "flutter_assets/assets/$modelName"
-        val assetManager = context.assets
-        val expectedBytes = assetManager.openFd(assetPath).use { it.length }
-        
+        val destinationFile = File(applicationContext.filesDir, modelName)
+        val tempFile = File(applicationContext.filesDir, "$modelName.tmp")
+
+        if (destinationFile.exists() && isValidModelFile(destinationFile)) {
+            Log.d(TAG, "Using cached model bundle at ${destinationFile.absolutePath}")
+            return@withContext ModelBundleResolver.resolveInferenceModelPath(
+                destinationFile,
+                applicationContext.filesDir
+            )
+        }
+
         if (destinationFile.exists()) {
-            if (destinationFile.length() == expectedBytes) {
-                Log.d("MainActivity", "Verified existing model: ${destinationFile.length()} bytes")
-                return@withContext destinationFile.absolutePath
-            } else {
-                Log.w("MainActivity", "Model size mismatch (${destinationFile.length()} != $expectedBytes). Re-extracting...")
-                destinationFile.delete()
-            }
+            destinationFile.delete()
+            Log.d(TAG, "Removed invalid cached model file.")
         }
 
-        try {
-            if (tempFile.exists()) tempFile.delete()
+        if (tempFile.exists()) {
+            tempFile.delete()
+        }
 
-            assetManager.open(assetPath).use { inputStream ->
-                FileOutputStream(tempFile).use { outputStream ->
-                    inputStream.copyTo(outputStream)
-                    
-                    // ATOMIC SYNC: Force the OS to finish writing before we return
-                    outputStream.flush()
-                    outputStream.getFD().sync() 
+        val assetBytes = copyModelFromAssets(modelName, tempFile)
+        Log.d(TAG, "Copied model size: $assetBytes bytes")
+
+        if (!isValidModelFile(tempFile)) {
+            tempFile.delete()
+            throw IllegalStateException(
+                "Model asset is missing or too small ($assetBytes bytes). " +
+                    "Run 'git lfs pull' and rebuild so assets/$modelName is bundled."
+            )
+        }
+
+        if (!tempFile.renameTo(destinationFile)) {
+            tempFile.delete()
+            throw IllegalStateException("Could not move model into app storage.")
+        }
+
+        Log.d(TAG, "Model bundle cached: ${destinationFile.absolutePath}")
+        val inferencePath = ModelBundleResolver.resolveInferenceModelPath(
+            destinationFile,
+            applicationContext.filesDir
+        )
+        Log.d(TAG, "Inference model ready: $inferencePath")
+        inferencePath
+    }
+
+    private fun copyModelFromAssets(modelName: String, tempFile: File): Long {
+        val assetManager = applicationContext.assets
+        val candidatePaths = listOf(
+            "flutter_assets/assets/$modelName",
+            "assets/$modelName"
+        )
+
+        var lastError: Exception? = null
+        for (assetPath in candidatePaths) {
+            try {
+                assetManager.open(assetPath).use { inputStream ->
+                    FileOutputStream(tempFile).use { outputStream ->
+                        val buffer = ByteArray(1024 * 1024)
+                        var total = 0L
+                        while (true) {
+                            val read = inputStream.read(buffer)
+                            if (read <= 0) break
+                            outputStream.write(buffer, 0, read)
+                            total += read
+                        }
+                        outputStream.flush()
+                        outputStream.fd.sync()
+                        return total
+                    }
                 }
+            } catch (e: Exception) {
+                lastError = e
+                Log.w(TAG, "Could not open asset at $assetPath", e)
             }
-
-            if (tempFile.length() != expectedBytes) {
-                tempFile.delete()
-                throw Exception("Asset copy incomplete: ${tempFile.length()} of $expectedBytes bytes")
-            }
-
-            if (!tempFile.renameTo(destinationFile)) {
-                tempFile.delete()
-                throw Exception("Atomic model install failed")
-            }
-
-            Log.d("MainActivity", "Model extraction complete. Sync successful.")
-        } catch (e: Exception) {
-            Log.e("MainActivity", "Fatal extraction error", e)
-            throw Exception("Asset extraction failed: ${e.message}")
         }
 
-        return@withContext destinationFile.absolutePath
+        throw IllegalStateException(
+            "Model asset '$modelName' not found in APK. Tried: ${candidatePaths.joinToString()}.",
+            lastError
+        )
+    }
+
+    private fun isValidModelFile(file: File): Boolean {
+        return file.exists() && file.length() >= MIN_MODEL_BYTES
+    }
+
+    companion object {
+        private const val TAG = "MainActivity"
+        private const val MODEL_FILE_NAME = "gemma4.task"
+        private const val MIN_MODEL_BYTES = 10L * 1024 * 1024
     }
 }
