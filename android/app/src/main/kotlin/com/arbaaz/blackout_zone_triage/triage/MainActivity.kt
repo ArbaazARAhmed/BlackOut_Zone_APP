@@ -7,7 +7,6 @@ import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
-import java.io.FileOutputStream
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -30,9 +29,11 @@ class MainActivity : FlutterActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 
+        clearLegacyPersistentModelCopies()
+        ModelBundleResolver.clearRuntimeDirectory(runtimeModelDir())
+
         deviceAssessment = OfflineAiCapability.assess(applicationContext)
         Log.i(TAG, "Offline AI assessment: ${deviceAssessment?.reason}")
-
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             channelName
@@ -84,8 +85,12 @@ class MainActivity : FlutterActivity() {
                                         )
                                     } else {
                                         val activeEngine = getOrCreateEngine()
-                                        withContext(Dispatchers.Default) {
-                                            activeEngine.generateTriageResponse(symptoms)
+                                        try {
+                                            withContext(Dispatchers.Default) {
+                                                activeEngine.generateTriageResponse(symptoms)
+                                            }
+                                        } finally {
+                                            releaseEngineAndDeleteRuntimeModel()
                                         }
                                     }
                                 } catch (aiError: Exception) {
@@ -128,8 +133,10 @@ class MainActivity : FlutterActivity() {
 
                     CoroutineScope(Dispatchers.Main).launch {
                         try {
-                            val activeEngine = getOrCreateEngine()
-                            result.success(activeEngine.getModelSchema())
+                            val schema = withContext(Dispatchers.IO) {
+                                buildModelSchema(assessment)
+                            }
+                            result.success(schema)
                         } catch (e: Exception) {
                             Log.e(TAG, "Model schema failed", e)
                             result.success(
@@ -174,6 +181,11 @@ class MainActivity : FlutterActivity() {
                     "Need at least 700 MB free app cache before loading Gemma."
                 )
             }
+            if (!OfflineAiCapability.cacheHasRoomForRuntimeModel(applicationContext)) {
+                throw IllegalStateException(
+                    "Need temporary storage for Gemma runtime model before loading."
+                )
+            }
 
             Log.d(TAG, "Preparing model...")
             val modelPath = prepareModel(MODEL_FILE_NAME)
@@ -198,52 +210,45 @@ class MainActivity : FlutterActivity() {
     }
 
     private suspend fun prepareModel(modelName: String): String = withContext(Dispatchers.IO) {
-        val destinationFile = File(applicationContext.filesDir, modelName)
-        val tempFile = File(applicationContext.filesDir, "$modelName.tmp")
-
-        if (destinationFile.exists() && isValidModelFile(destinationFile)) {
-            Log.d(TAG, "Using cached model bundle at ${destinationFile.absolutePath}")
-            return@withContext ModelBundleResolver.resolveInferenceModelPath(
-                destinationFile,
-                applicationContext.filesDir
-            )
+        val runtimeDir = runtimeModelDir()
+        val assetPath = findModelAssetPath(modelName)
+        val inferencePath = applicationContext.assets.open(assetPath).use { input ->
+            ModelBundleResolver.extractTarAsset(input, assetPath, runtimeDir)
         }
-
-        if (destinationFile.exists()) {
-            destinationFile.delete()
-            Log.d(TAG, "Removed invalid cached model file.")
-        }
-
-        if (tempFile.exists()) {
-            tempFile.delete()
-        }
-
-        val assetBytes = copyModelFromAssets(modelName, tempFile)
-        Log.d(TAG, "Copied model size: $assetBytes bytes")
-
-        if (!isValidModelFile(tempFile)) {
-            tempFile.delete()
-            throw IllegalStateException(
-                "Model asset is missing or too small ($assetBytes bytes). " +
-                    "Run 'git lfs pull' and rebuild so assets/$modelName is bundled."
-            )
-        }
-
-        if (!tempFile.renameTo(destinationFile)) {
-            tempFile.delete()
-            throw IllegalStateException("Could not move model into app storage.")
-        }
-
-        Log.d(TAG, "Model bundle cached: ${destinationFile.absolutePath}")
-        val inferencePath = ModelBundleResolver.resolveInferenceModelPath(
-            destinationFile,
-            applicationContext.filesDir
-        )
         Log.d(TAG, "Inference model ready: $inferencePath")
         inferencePath
     }
 
-    private fun copyModelFromAssets(modelName: String, tempFile: File): Long {
+    private suspend fun releaseEngineAndDeleteRuntimeModel() {
+        engineInitMutex.withLock {
+            engine?.close()
+            engine = null
+            withContext(Dispatchers.IO) {
+                ModelBundleResolver.clearRuntimeDirectory(runtimeModelDir())
+            }
+            Log.d(TAG, "Gemma engine closed and runtime model cache cleared.")
+        }
+    }
+
+    private fun buildModelSchema(assessment: OfflineAiCapability.Assessment): String {
+        val assetPath = findModelAssetPath(MODEL_FILE_NAME)
+        val assetBytes = applicationContext.assets.openFd(assetPath).use { descriptor ->
+            descriptor.length
+        }
+        return buildString {
+            appendLine("Status: Gemma offline engine available")
+            appendLine("Mode: Load only during analysis")
+            appendLine("Model asset: $assetPath")
+            appendLine("Asset size: $assetBytes bytes")
+            appendLine("Runtime file: temporary cache only")
+            appendLine("Persistent model copy: disabled")
+            appendLine("Cleanup: model cache deleted after each Gemma response")
+            appendLine("Device check: ${assessment.reason}")
+            appendLine("Max tokens: 256")
+        }.trimEnd()
+    }
+
+    private fun findModelAssetPath(modelName: String): String {
         val assetManager = applicationContext.assets
         val candidatePaths = listOf(
             "flutter_assets/assets/$modelName",
@@ -253,21 +258,8 @@ class MainActivity : FlutterActivity() {
         var lastError: Exception? = null
         for (assetPath in candidatePaths) {
             try {
-                assetManager.open(assetPath).use { inputStream ->
-                    FileOutputStream(tempFile).use { outputStream ->
-                        val buffer = ByteArray(1024 * 1024)
-                        var total = 0L
-                        while (true) {
-                            val read = inputStream.read(buffer)
-                            if (read <= 0) break
-                            outputStream.write(buffer, 0, read)
-                            total += read
-                        }
-                        outputStream.flush()
-                        outputStream.fd.sync()
-                        return total
-                    }
-                }
+                assetManager.openFd(assetPath).close()
+                return assetPath
             } catch (e: Exception) {
                 lastError = e
                 Log.w(TAG, "Could not open asset at $assetPath", e)
@@ -280,13 +272,34 @@ class MainActivity : FlutterActivity() {
         )
     }
 
-    private fun isValidModelFile(file: File): Boolean {
-        return file.exists() && file.length() >= MIN_MODEL_BYTES
+    private fun runtimeModelDir(): File {
+        return File(applicationContext.cacheDir, RUNTIME_MODEL_DIR)
+    }
+
+    private fun clearLegacyPersistentModelCopies() {
+        applicationContext.filesDir.listFiles()
+            ?.filter { file ->
+                file.isFile &&
+                    file.name.startsWith("gemma", ignoreCase = true) &&
+                    (
+                        file.name.endsWith(".task", ignoreCase = true) ||
+                            file.name.endsWith(".task.tmp", ignoreCase = true) ||
+                            file.name.endsWith(".bin", ignoreCase = true) ||
+                            file.name.endsWith(".bin.tmp", ignoreCase = true)
+                    )
+            }
+            ?.forEach { file ->
+                if (file.delete()) {
+                    Log.d(TAG, "Deleted legacy persistent model copy: ${file.name}")
+                } else {
+                    Log.w(TAG, "Could not delete legacy persistent model copy: ${file.absolutePath}")
+                }
+            }
     }
 
     companion object {
         private const val TAG = "MainActivity"
         private const val MODEL_FILE_NAME = "gemma4.task"
-        private const val MIN_MODEL_BYTES = 10L * 1024 * 1024
+        private const val RUNTIME_MODEL_DIR = "gemma_runtime"
     }
 }

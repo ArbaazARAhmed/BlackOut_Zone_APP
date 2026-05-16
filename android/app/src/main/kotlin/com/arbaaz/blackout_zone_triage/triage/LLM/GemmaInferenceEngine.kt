@@ -14,7 +14,7 @@ class GemmaInferenceEngine(
     private val context: Context,
     private val absoluteModelPath: String,
     private val bridge: TriageFunctionBridge
-) {
+) : AutoCloseable {
 
     private var llm: LlmInference? = null
     private val inferenceMutex = Mutex()
@@ -65,6 +65,16 @@ class GemmaInferenceEngine(
     }
 
     fun isReady(): Boolean = llm != null
+
+    override fun close() {
+        try {
+            llm?.close()
+        } catch (e: Exception) {
+            Log.w(TAG, "Gemma close failed", e)
+        } finally {
+            llm = null
+        }
+    }
 
     suspend fun generateTriageResponse(userPrompt: String): String = withContext(Dispatchers.Default) {
         inferenceMutex.withLock {

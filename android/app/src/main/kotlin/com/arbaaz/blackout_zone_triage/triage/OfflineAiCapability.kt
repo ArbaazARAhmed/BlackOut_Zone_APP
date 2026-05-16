@@ -6,18 +6,18 @@ import android.os.Build
 import android.system.Os
 import android.system.OsConstants
 import android.util.Log
-import java.io.File
 
 /**
- * MediaPipe Gemma needs ~1.3 GB RAM for weights plus ~250 MB cache writes under [Context.getCacheDir].
+ * MediaPipe Gemma needs ~1.3 GB RAM for weights plus cache writes under [Context.getCacheDir].
  * If we call native init when that is not available, the process aborts (SIGABRT) — not catchable in Kotlin.
  */
 object OfflineAiCapability {
 
     private const val TAG = "OfflineAiCapability"
     private const val MIN_AVAILABLE_RAM_BYTES = 1_800_000_000L
-    private const val MIN_CACHE_FREE_BYTES = 700_000_000L
-    private const val MIN_INTERNAL_FREE_BYTES = 2_500_000_000L
+    private const val MIN_MEDIAPIPE_CACHE_FREE_BYTES = 700_000_000L
+    private const val MIN_RUNTIME_CACHE_FREE_BYTES =
+        ModelBundleResolver.EXPECTED_BIN_BYTES + MIN_MEDIAPIPE_CACHE_FREE_BYTES
 
     data class Assessment(
         val canUseGemma: Boolean,
@@ -66,17 +66,10 @@ object OfflineAiCapability {
             )
         }
 
-        if (cacheFree < MIN_CACHE_FREE_BYTES) {
+        if (cacheFree < MIN_RUNTIME_CACHE_FREE_BYTES) {
             return Assessment(
                 canUseGemma = false,
-                reason = "Not enough app cache space (${cacheFree / 1_000_000} MB free); using local protocols only."
-            )
-        }
-
-        if (filesFree < MIN_INTERNAL_FREE_BYTES) {
-            return Assessment(
-                canUseGemma = false,
-                reason = "Not enough storage (${filesFree / 1_000_000} MB free); using local protocols only."
+                reason = "Not enough temporary storage (${cacheFree / 1_000_000} MB free); using local protocols only."
             )
         }
 
@@ -97,7 +90,11 @@ object OfflineAiCapability {
     }
 
     fun cacheHasRoomForMediapipe(context: Context): Boolean {
-        return context.cacheDir.freeSpace >= MIN_CACHE_FREE_BYTES
+        return context.cacheDir.freeSpace >= MIN_MEDIAPIPE_CACHE_FREE_BYTES
+    }
+
+    fun cacheHasRoomForRuntimeModel(context: Context): Boolean {
+        return context.cacheDir.freeSpace >= MIN_RUNTIME_CACHE_FREE_BYTES
     }
 
     private fun pageSizeBytes(): Long {
