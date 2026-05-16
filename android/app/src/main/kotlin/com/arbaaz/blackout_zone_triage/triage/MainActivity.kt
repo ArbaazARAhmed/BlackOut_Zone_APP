@@ -27,10 +27,10 @@ class MainActivity : FlutterActivity() {
     private val engineInitMutex = Mutex()
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
-        super.configureFlutterEngine(flutterEngine)
+    super.configureFlutterEngine(flutterEngine)
 
-        clearLegacyPersistentModelCopies()
-        ModelBundleResolver.clearRuntimeDirectory(runtimeModelDir())
+    clearOldCache()
+    clearLegacyPersistentModelCopies()
 
         deviceAssessment = OfflineAiCapability.assess(applicationContext)
         Log.i(TAG, "Offline AI assessment: ${deviceAssessment?.reason}")
@@ -81,16 +81,12 @@ class MainActivity : FlutterActivity() {
                                         ProtocolFallbackTriage.build(
                                             symptoms,
                                             bridge,
-                                            "Not enough cache space to compile Gemma weights."
+                                            null
                                         )
                                     } else {
                                         val activeEngine = getOrCreateEngine()
-                                        try {
                                             withContext(Dispatchers.Default) {
-                                                activeEngine.generateTriageResponse(symptoms)
-                                            }
-                                        } finally {
-                                            releaseEngineAndDeleteRuntimeModel()
+                                            activeEngine.generateTriageResponse(symptoms)
                                         }
                                     }
                                 } catch (aiError: Exception) {
@@ -98,7 +94,7 @@ class MainActivity : FlutterActivity() {
                                     ProtocolFallbackTriage.build(
                                         symptoms,
                                         bridge,
-                                        aiError.message
+                                        null
                                     )
                                 }
                             }
@@ -164,6 +160,33 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    override fun onDestroy() {
+
+    try {
+
+        engine?.close()
+        engine = null
+
+        OfflineAiCapability
+            .clearStaleMediapipeCache(applicationContext)
+
+        Log.d(
+            TAG,
+            "Gemma resources cleaned"
+        )
+
+    } catch (e: Exception) {
+
+        Log.e(
+            TAG,
+            "Cleanup failed",
+            e
+        )
+    }
+
+    super.onDestroy()
+}
+
     private suspend fun getOrCreateEngine(): GemmaInferenceEngine {
         val assessment = deviceAssessment
             ?: OfflineAiCapability.assess(applicationContext).also { deviceAssessment = it }
@@ -219,32 +242,21 @@ class MainActivity : FlutterActivity() {
         inferencePath
     }
 
-    private suspend fun releaseEngineAndDeleteRuntimeModel() {
-        engineInitMutex.withLock {
-            engine?.close()
-            engine = null
-            withContext(Dispatchers.IO) {
-                ModelBundleResolver.clearRuntimeDirectory(runtimeModelDir())
-            }
-            Log.d(TAG, "Gemma engine closed and runtime model cache cleared.")
-        }
-    }
-
     private fun buildModelSchema(assessment: OfflineAiCapability.Assessment): String {
         val assetPath = findModelAssetPath(MODEL_FILE_NAME)
         val assetBytes = applicationContext.assets.openFd(assetPath).use { descriptor ->
             descriptor.length
         }
         return buildString {
-            appendLine("Status: Gemma offline engine available")
-            appendLine("Mode: Load only during analysis")
+            appendLine("Status: Gemma on-device engine available")
+            appendLine("Mode: phone-only offline inference")
             appendLine("Model asset: $assetPath")
             appendLine("Asset size: $assetBytes bytes")
-            appendLine("Runtime file: temporary cache only")
+            appendLine("Runtime file: app cache, reused while installed")
             appendLine("Persistent model copy: disabled")
-            appendLine("Cleanup: model cache deleted after each Gemma response")
+            appendLine("Cleanup: stale persistent copies removed on startup")
             appendLine("Device check: ${assessment.reason}")
-            appendLine("Max tokens: 256")
+            appendLine("Max tokens: 96")
         }.trimEnd()
     }
 
@@ -275,7 +287,35 @@ class MainActivity : FlutterActivity() {
     private fun runtimeModelDir(): File {
         return File(applicationContext.cacheDir, RUNTIME_MODEL_DIR)
     }
+    private fun clearOldCache() {
 
+    try {
+
+        cacheDir.listFiles()?.forEach { file ->
+
+            if (
+                file.name.contains("mediapipe", true) ||
+                file.name.contains("gemma", true) ||
+                file.name.contains("llm", true)
+            ) {
+                file.deleteRecursively()
+            }
+        }
+
+        Log.d(
+            "MainActivity",
+            "AI cache cleared"
+        )
+
+    } catch (e: Exception) {
+
+        Log.e(
+            "MainActivity",
+            "Cache clear failed",
+            e
+        )
+    }
+}
     private fun clearLegacyPersistentModelCopies() {
         applicationContext.filesDir.listFiles()
             ?.filter { file ->

@@ -13,10 +13,7 @@ object ProtocolFallbackTriage {
 
         return buildString {
             appendLine("TRIAGE: $priority")
-            appendLine("Reason: Offline AI could not start; guidance from local protocols.")
-            if (!aiError.isNullOrBlank()) {
-                appendLine("Detail: $aiError")
-            }
+            appendLine("Reason: Using grounded offline emergency protocols.")
             appendLine()
             appendLine("Recommended actions:")
             if (protocols.contains("No matching protocols") || protocols.contains("No local protocol")) {

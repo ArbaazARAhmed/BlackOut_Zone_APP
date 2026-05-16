@@ -67,6 +67,16 @@ object ModelBundleResolver {
 
     fun extractTarAsset(input: InputStream, assetName: String, outputDir: File): String {
         outputDir.mkdirs()
+
+        val existingBin = outputDir.listFiles()
+            ?.filter { it.isFile && it.name.endsWith(".bin", ignoreCase = true) }
+            ?.firstOrNull { isValidInferenceModel(it) }
+
+        if (existingBin != null) {
+            Log.d(TAG, "Using cached runtime model: ${existingBin.absolutePath}")
+            return existingBin.absolutePath
+        }
+
         clearRuntimeDirectory(outputDir)
 
         Log.d(TAG, "Extracting tar model asset: $assetName")
